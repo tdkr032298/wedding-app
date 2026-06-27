@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { ChangeEvent, FormEvent, useRef, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useRef, useState } from "react";
 import { AuthGuard } from "@/components/AuthGuard";
 import { supabase } from "@/lib/supabase";
 
@@ -49,38 +49,43 @@ function createFilePath(guestId: string, fileName: string) {
 
 export default function UploadPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [previewUrl, setPreviewUrl] = useState("");
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
+  const [previewUrls, setPreviewUrls] = useState<string[]>([]);
   const [caption, setCaption] = useState("");
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [isUploading, setIsUploading] = useState(false);
 
+  useEffect(() => {
+    return () => {
+      previewUrls.forEach((url) => URL.revokeObjectURL(url));
+    };
+  }, [previewUrls]);
+
   function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0] ?? null;
+    const files = Array.from(event.target.files ?? []);
 
     setError("");
     setMessage("");
+    previewUrls.forEach((url) => URL.revokeObjectURL(url));
 
-    if (previewUrl) {
-      URL.revokeObjectURL(previewUrl);
-    }
-
-    if (!file) {
-      setSelectedFile(null);
-      setPreviewUrl("");
+    if (files.length === 0) {
+      setSelectedFiles([]);
+      setPreviewUrls([]);
       return;
     }
 
-    if (!file.type.startsWith("image/")) {
-      setSelectedFile(null);
-      setPreviewUrl("");
+    const invalidFile = files.find((file) => !file.type.startsWith("image/"));
+
+    if (invalidFile) {
+      setSelectedFiles([]);
+      setPreviewUrls([]);
       setError("画像ファイルを選択してください");
       return;
     }
 
-    setSelectedFile(file);
-    setPreviewUrl(URL.createObjectURL(file));
+    setSelectedFiles(files);
+    setPreviewUrls(files.map((file) => URL.createObjectURL(file)));
   }
 
   async function handleUpload(
@@ -92,42 +97,50 @@ export default function UploadPage() {
     setError("");
     setMessage("");
 
-    if (!selectedFile) {
+    if (selectedFiles.length === 0) {
       setError("画像を選択してください");
       return;
     }
 
-    if (!selectedFile.type.startsWith("image/")) {
+    if (selectedFiles.some((file) => !file.type.startsWith("image/"))) {
       setError("画像ファイルを選択してください");
       return;
     }
 
     setIsUploading(true);
 
-    const filePath = createFilePath(guestId, selectedFile.name);
-    const { error: uploadError } = await supabase.storage
-      .from(bucketName)
-      .upload(filePath, selectedFile, {
-        contentType: selectedFile.type,
-        upsert: false,
-      });
+    const uploadedPhotos = [];
 
-    if (uploadError) {
-      setIsUploading(false);
-      setError(`アップロードに失敗しました: ${formatSupabaseError(uploadError)}`);
-      return;
+    for (const file of selectedFiles) {
+      const filePath = createFilePath(guestId, file.name);
+      const { error: uploadError } = await supabase.storage
+        .from(bucketName)
+        .upload(filePath, file, {
+          contentType: file.type,
+          upsert: false,
+        });
+
+      if (uploadError) {
+        setIsUploading(false);
+        setError(`アップロードに失敗しました: ${formatSupabaseError(uploadError)}`);
+        return;
+      }
+
+      const { data: publicUrlData } = supabase.storage
+        .from(bucketName)
+        .getPublicUrl(filePath);
+
+      uploadedPhotos.push({
+        guest_name: guestName,
+        image_url: publicUrlData.publicUrl,
+        file_path: filePath,
+        caption: caption.trim() || null,
+      });
     }
 
-    const { data: publicUrlData } = supabase.storage
-      .from(bucketName)
-      .getPublicUrl(filePath);
-
-    const { error: insertError } = await supabase.from("photos").insert({
-      guest_name: guestName,
-      image_url: publicUrlData.publicUrl,
-      file_path: filePath,
-      caption: caption.trim() || null,
-    });
+    const { error: insertError } = await supabase
+      .from("photos")
+      .insert(uploadedPhotos);
 
     setIsUploading(false);
 
@@ -138,13 +151,11 @@ export default function UploadPage() {
       return;
     }
 
-    setMessage("アップロードしました");
-    setSelectedFile(null);
+    setMessage(`${uploadedPhotos.length}枚アップロードしました`);
+    setSelectedFiles([]);
     setCaption("");
-    if (previewUrl) {
-      URL.revokeObjectURL(previewUrl);
-    }
-    setPreviewUrl("");
+    previewUrls.forEach((url) => URL.revokeObjectURL(url));
+    setPreviewUrls([]);
 
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
@@ -176,20 +187,33 @@ export default function UploadPage() {
                   <input
                     accept="image/*"
                     className="block w-full rounded-md border border-stone-300 bg-white px-3 py-3 text-sm file:mr-4 file:rounded-md file:border-0 file:bg-rose-100 file:px-4 file:py-2 file:font-semibold file:text-rose-700"
+                    multiple
                     onChange={handleFileChange}
                     ref={fileInputRef}
                     type="file"
                   />
                 </label>
 
-                {previewUrl ? (
-                  <div className="overflow-hidden rounded-lg border border-stone-200 bg-stone-50">
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      alt="選択した画像のプレビュー"
-                      className="max-h-[420px] w-full object-contain"
-                      src={previewUrl}
-                    />
+                {previewUrls.length > 0 ? (
+                  <div className="rounded-lg border border-stone-200 bg-stone-50 p-3">
+                    <p className="mb-3 text-sm font-semibold text-stone-600">
+                      {previewUrls.length}枚選択中
+                    </p>
+                    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+                      {previewUrls.map((previewUrl, index) => (
+                        <div
+                          className="overflow-hidden rounded-md border border-stone-200 bg-white"
+                          key={previewUrl}
+                        >
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img
+                            alt={`選択した画像のプレビュー ${index + 1}`}
+                            className="aspect-square w-full object-cover"
+                            src={previewUrl}
+                          />
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 ) : null}
 
